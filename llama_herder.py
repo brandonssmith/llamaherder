@@ -96,6 +96,7 @@ class OllamaManager:
         download_btn_frame.grid(row=3, column=0, pady=(5, 0))
         download_btn_frame.columnconfigure(0, weight=1)
         download_btn_frame.columnconfigure(1, weight=1)
+        download_btn_frame.columnconfigure(2, weight=1)
         
         # Cancel button (initially hidden)
         self.cancel_download_btn = ttk.Button(download_btn_frame, text="Cancel Download",
@@ -108,6 +109,12 @@ class OllamaManager:
                                             command=self.resume_download)
         self.resume_download_btn.grid(row=0, column=1, padx=(5, 0), sticky=(tk.W, tk.E))
         self.resume_download_btn.grid_remove()  # Hide initially
+        
+        # Clear button (initially hidden)
+        self.clear_download_btn = ttk.Button(download_btn_frame, text="Clear State",
+                                           command=self.clear_download_state)
+        self.clear_download_btn.grid(row=0, column=2, padx=(5, 0), sticky=(tk.W, tk.E))
+        self.clear_download_btn.grid_remove()  # Hide initially
         
         # Main status bar
         status_frame = ttk.Frame(main_frame)
@@ -446,16 +453,27 @@ class OllamaManager:
         self.download_status_frame.grid_remove()
         self.cancel_download_btn.grid_remove()
         self.resume_download_btn.grid_remove()
+        self.clear_download_btn.grid_remove()
     
     def show_resume_option(self):
         """Show resume button when download is interrupted"""
         self.cancel_download_btn.grid_remove()
         self.resume_download_btn.grid()
+        self.clear_download_btn.grid()
+    
+    def clear_download_state(self):
+        """Clear the download state and hide all download buttons"""
+        self.download_active = False
+        self.current_download_model = None
+        self.hide_progress()
+        self.status_var.set("Download state cleared")
+        messagebox.showinfo("State Cleared", "Download state has been cleared. You can now start a new download.")
     
     def cancel_download(self):
         """Cancel the current download"""
         if self.download_active:
             self.download_active = False
+            # Don't reset current_download_model here - keep it for resumption
             self.status_var.set("Download cancelled by user")
             self.update_download_status("Download cancelled - click Resume to continue")
             self.show_resume_option()
@@ -473,7 +491,10 @@ class OllamaManager:
             # Start the download process again
             self.install_model_by_name(self.current_download_model)
         else:
-            messagebox.showwarning("No Download to Resume", "No interrupted download found to resume.")
+            messagebox.showwarning("No Download to Resume", 
+                                 f"No interrupted download found to resume.\n\n"
+                                 f"Current download model: {self.current_download_model}\n"
+                                 f"Download active: {self.download_active}")
     
     def update_progress(self, percentage, message=""):
         """Update progress bar and message"""
@@ -1001,6 +1022,10 @@ class OllamaManager:
         if not result:
             return
         
+        # Clear any previous download state
+        self.download_active = False
+        self.current_download_model = None
+        
         # Start download
         self.download_active = True
         self.current_download_model = model_name
@@ -1136,6 +1161,9 @@ class OllamaManager:
                                     self.root.after(0, lambda: self.update_progress(100, "Download complete!"))
                                     self.root.after(0, self.hide_progress)
                                     
+                                    # Reset download tracking since download completed successfully
+                                    self.current_download_model = None
+                                    
                                     # Verify installation by refreshing and checking if model appears
                                     self.root.after(0, self.verify_installation, model_name)
                                     break
@@ -1169,6 +1197,10 @@ class OllamaManager:
                         self.root.after(0, lambda: self.update_download_status(f"Successfully installed {model_name}!"))
                         self.root.after(0, lambda: self.update_progress(100, "Download complete!"))
                         self.root.after(0, self.hide_progress)
+                        
+                        # Reset download tracking since download completed successfully
+                        self.current_download_model = None
+                        
                         self.root.after(0, self.verify_installation, model_name)
                     else:
                         error_msg = f"CLI download also failed: {result.stderr}"
@@ -1192,7 +1224,8 @@ class OllamaManager:
                 self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
             finally:
                 self.download_active = False
-                self.current_download_model = None
+                # Only reset current_download_model if download completed successfully
+                # If cancelled, keep it for resumption
         
         threading.Thread(target=install_model, daemon=True).start()
     
