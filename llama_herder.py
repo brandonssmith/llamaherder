@@ -1046,177 +1046,79 @@ class OllamaManager:
                 if test_response.status_code != 200:
                     raise Exception("Cannot connect to Ollama - make sure it's running")
                 
-                self.root.after(0, lambda: self.update_download_status("Connection OK, starting download..."))
+                self.root.after(0, lambda: self.update_download_status("Connection OK, starting CLI download..."))
                 
-                # Use streaming API for resumable downloads with real progress
-                self.root.after(0, lambda: self.update_download_status("Starting resumable download..."))
+                # Use CLI method as primary approach (more reliable)
+                self.root.after(0, lambda: self.update_download_status("Starting download via CLI..."))
                 
-                # Use streaming API to pull model with progress tracking
-                # Set a reasonable timeout for the initial connection
-                response = requests.post(f"{self.ollama_url}/api/pull", 
-                                       json={"name": model_name}, 
-                                       stream=True, timeout=30)
+                # Start the CLI download process
+                start_time = time.time()
+                process = subprocess.Popen(['ollama', 'pull', model_name], 
+                                         stdout=subprocess.PIPE, 
+                                         stderr=subprocess.PIPE, 
+                                         text=True, bufsize=1, universal_newlines=True)
                 
-                if response.status_code == 200:
-                    total_size = None
-                    downloaded_size = 0
-                    manifest_start_time = None
-                    last_update_time = time.time()
-                    download_start_time = time.time()
-                    last_completed = 0
+                # Track progress while download is running
+                progress = 0
+                last_update = time.time()
+                manifest_phase = True
+                
+                while process.poll() is None:
+                    if not self.download_active:  # Check if cancelled
+                        process.terminate()
+                        break
                     
-                    for line in response.iter_lines():
-                        # Check if download was cancelled
-                        if not self.download_active:
-                            break
-                            
-                        if not line:
-                            continue
-                        
-                        # Check for timeout - if no updates for 60 seconds, consider it stuck
-                        current_time = time.time()
-                        if current_time - last_update_time > 60:
-                            self.root.after(0, lambda: self.status_var.set(f"Download appears stuck - no updates for 60 seconds"))
-                            self.root.after(0, lambda: self.update_download_status(f"Download may be stuck. Check your internet connection or click Cancel."))
-                            break
-                            
-                        try:
-                            data = json.loads(line.decode('utf-8'))
-                            last_update_time = time.time()  # Update timestamp when we get any response
-                            
-                            # Update status based on response
-                            if 'status' in data:
-                                status = data['status']
-                                
-                                if status == 'pulling manifest':
-                                    if manifest_start_time is None:
-                                        manifest_start_time = time.time()
-                                        self.root.after(0, lambda: self.status_var.set(f"Downloading manifest for {model_name}..."))
-                                        self.root.after(0, lambda: self.update_download_status(f"Downloading manifest for {model_name}..."))
-                                        self.root.after(0, lambda: self.update_progress(5, "Getting manifest - this should be quick"))
-                                    else:
-                                        # Show how long manifest has been downloading
-                                        elapsed = time.time() - manifest_start_time
-                                        if elapsed > 30:  # If manifest takes more than 30 seconds
-                                            self.root.after(0, lambda: self.update_download_status(f"Manifest download taking longer than expected ({elapsed:.0f}s) - check connection"))
-                                    
-                                elif status == 'downloading':
-                                    if 'total' in data and 'completed' in data:
-                                        total = data['total']
-                                        completed = data['completed']
-                                        percentage = (completed / total) * 100
-                                        
-                                        # Convert bytes to human readable
-                                        total_mb = total / (1024 * 1024)
-                                        completed_mb = completed / (1024 * 1024)
-                                        
-                                        # Calculate download speed and remaining time
-                                        elapsed_time = time.time() - download_start_time
-                                        if completed > last_completed and elapsed_time > 0:
-                                            # Calculate speed in MB/s
-                                            speed_mbps = (completed - last_completed) / (1024 * 1024) / 2  # Assuming 2-second intervals
-                                            remaining_bytes = total - completed
-                                            if speed_mbps > 0:
-                                                remaining_seconds = remaining_bytes / (1024 * 1024) / speed_mbps
-                                                if remaining_seconds < 60:
-                                                    speed_info = f" ({speed_mbps:.1f} MB/s, ~{remaining_seconds:.0f}s remaining)"
-                                                else:
-                                                    speed_info = f" ({speed_mbps:.1f} MB/s, ~{remaining_seconds/60:.1f}m remaining)"
-                                            else:
-                                                speed_info = " (calculating speed...)"
-                                        else:
-                                            speed_info = ""
-                                        
-                                        last_completed = completed
-                                        
-                                        self.root.after(0, lambda: self.status_var.set(
-                                            f"Downloading {model_name}: {completed_mb:.1f}MB / {total_mb:.1f}MB"))
-                                        self.root.after(0, lambda: self.update_download_status(
-                                            f"Downloading {model_name}: {completed_mb:.1f}MB / {total_mb:.1f}MB{speed_info}"))
-                                        self.root.after(0, lambda: self.update_progress(
-                                            percentage, f"{completed_mb:.1f}MB / {total_mb:.1f}MB"))
-                                    else:
-                                        # Show that we're downloading but don't have progress info yet
-                                        self.root.after(0, lambda: self.update_download_status(f"Downloading {model_name}..."))
-                                        self.root.after(0, lambda: self.update_progress(10, "Downloading..."))
-                                
-                                elif status == 'verifying sha256 digest':
-                                    self.root.after(0, lambda: self.status_var.set(f"Verifying {model_name}..."))
-                                    self.root.after(0, lambda: self.update_download_status(f"Verifying {model_name}..."))
-                                    self.root.after(0, lambda: self.update_progress(95, "Verifying download"))
-                                    
-                                elif status == 'writing manifest':
-                                    self.root.after(0, lambda: self.status_var.set(f"Finalizing {model_name}..."))
-                                    self.root.after(0, lambda: self.update_download_status(f"Finalizing {model_name}..."))
-                                    self.root.after(0, lambda: self.update_progress(98, "Writing manifest"))
-                                    
-                                elif status == 'removing any unused layers':
-                                    self.root.after(0, lambda: self.status_var.set(f"Cleaning up {model_name}..."))
-                                    self.root.after(0, lambda: self.update_download_status(f"Cleaning up {model_name}..."))
-                                    self.root.after(0, lambda: self.update_progress(99, "Cleaning up"))
-                                    
-                                elif status == 'success':
-                                    self.root.after(0, lambda: self.status_var.set(f"Successfully installed {model_name}"))
-                                    self.root.after(0, lambda: self.update_download_status(f"Successfully installed {model_name}!"))
-                                    self.root.after(0, lambda: self.update_progress(100, "Download complete!"))
-                                    self.root.after(0, self.hide_progress)
-                                    
-                                    # Reset download tracking since download completed successfully
-                                    self.current_download_model = None
-                                    
-                                    # Verify installation by refreshing and checking if model appears
-                                    self.root.after(0, self.verify_installation, model_name)
-                                    break
-                                    
-                        except json.JSONDecodeError:
-                            continue
-                        except Exception as e:
-                            # Log error but continue processing
-                            self.root.after(0, lambda: self.status_var.set(f"Warning: Error parsing response - {str(e)}"))
-                            continue
-                
-                else:
-                    error_msg = f"Failed to install model: {response.text}"
-                    self.root.after(0, lambda: self.status_var.set(error_msg))
-                    self.root.after(0, lambda: self.hide_progress())
-                    self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
+                    current_time = time.time()
+                    elapsed = int(current_time - start_time)
                     
-            except requests.exceptions.RequestException as e:
-                error_msg = f"API download failed: {str(e)}"
-                self.root.after(0, lambda: self.status_var.set(error_msg))
-                self.root.after(0, lambda: self.update_download_status("API failed, trying CLI method..."))
-                
-                # Try CLI method as fallback
-                try:
-                    self.root.after(0, lambda: self.update_download_status("Using CLI method to download..."))
-                    result = subprocess.run(['ollama', 'pull', model_name], 
-                                          capture_output=True, text=True, timeout=600)
-                    
-                    if result.returncode == 0:
-                        self.root.after(0, lambda: self.status_var.set(f"Successfully installed {model_name} via CLI"))
-                        self.root.after(0, lambda: self.update_download_status(f"Successfully installed {model_name}!"))
-                        self.root.after(0, lambda: self.update_progress(100, "Download complete!"))
-                        self.root.after(0, self.hide_progress)
-                        
-                        # Reset download tracking since download completed successfully
-                        self.current_download_model = None
-                        
-                        self.root.after(0, self.verify_installation, model_name)
+                    # Update progress and status
+                    if manifest_phase and elapsed < 30:
+                        # Manifest phase - should be quick
+                        progress = min(5 + (elapsed * 2), 15)
+                        self.root.after(0, lambda: self.update_download_status(f"Downloading manifest for {model_name}... ({elapsed}s)"))
+                        self.root.after(0, lambda: self.update_progress(progress, "Getting manifest..."))
+                    elif manifest_phase and elapsed >= 30:
+                        # Manifest taking too long - switch to download phase
+                        manifest_phase = False
+                        progress = 15
+                        self.root.after(0, lambda: self.update_download_status(f"Manifest complete, downloading {model_name}... ({elapsed}s)"))
+                        self.root.after(0, lambda: self.update_progress(progress, "Downloading model..."))
                     else:
-                        error_msg = f"CLI download also failed: {result.stderr}"
-                        self.root.after(0, lambda: self.status_var.set(error_msg))
-                        self.root.after(0, lambda: self.hide_progress())
-                        self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
-                except subprocess.TimeoutExpired:
-                    error_msg = "Download timed out after 10 minutes"
+                        # Download phase - gradually increase progress
+                        progress = min(15 + ((elapsed - 30) * 1.5), 90)
+                        self.root.after(0, lambda: self.update_download_status(f"Downloading {model_name}... ({elapsed}s elapsed)"))
+                        self.root.after(0, lambda: self.update_progress(progress, f"Downloading... {progress:.0f}%"))
+                    
+                    # Check for timeout
+                    if elapsed > 600:  # 10 minutes timeout
+                        self.root.after(0, lambda: self.update_download_status("Download timeout - taking longer than expected"))
+                        break
+                    
+                    time.sleep(2)  # Update every 2 seconds
+                
+                # Check result
+                stdout, stderr = process.communicate()
+                if process.returncode == 0:
+                    self.root.after(0, lambda: self.status_var.set(f"Successfully installed {model_name}"))
+                    self.root.after(0, lambda: self.update_download_status(f"Successfully installed {model_name}!"))
+                    self.root.after(0, lambda: self.update_progress(100, "Download complete!"))
+                    self.root.after(0, self.hide_progress)
+                    
+                    # Reset download tracking since download completed successfully
+                    self.current_download_model = None
+                    
+                    # Verify installation by refreshing and checking if model appears
+                    self.root.after(0, self.verify_installation, model_name)
+                    return
+                else:
+                    # CLI failed
+                    error_msg = f"CLI download failed: {stderr}"
                     self.root.after(0, lambda: self.status_var.set(error_msg))
+                    self.root.after(0, lambda: self.update_download_status(f"Download failed: {stderr}"))
                     self.root.after(0, lambda: self.hide_progress())
-                    self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
-                except Exception as cli_error:
-                    error_msg = f"CLI download failed: {str(cli_error)}"
-                    self.root.after(0, lambda: self.status_var.set(error_msg))
-                    self.root.after(0, lambda: self.hide_progress())
-                    self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
+                    self.root.after(0, lambda: messagebox.showerror("Download Failed", error_msg))
+                    return
+                    
             except Exception as e:
                 error_msg = f"Unexpected error: {str(e)}"
                 self.root.after(0, lambda: self.status_var.set(error_msg))
